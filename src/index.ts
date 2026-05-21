@@ -3,17 +3,10 @@ import express from "express";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || process.env.AIRTABLE || "";
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || "";
-const AIRTABLE_PROGRAMS_TABLE = process.env.AIRTABLE_PROGRAMS_TABLE || "tblb080LKdZLFit2x";
-const AIRTABLE_ACTIONS_TABLE = process.env.AIRTABLE_ACTIONS_TABLE || "tblaMHswXQx4r9ba1";
-
-function getRecordId(req: any): string {
-  const q = req.query?.recordId;
-  if (typeof q === "string" && q.trim()) return decodeURIComponent(q.trim());
-  const match = (req.url || "").match(/[?&]recordId=([^&]+)/);
-  return match?.[1] ? decodeURIComponent(match[1].trim()) : "";
-}
+const AIRTABLE_API_KEY = process.env.AIRTABLE || process.env.AIRTABLE_API_KEY || "";
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || "app1ulAFNbDuizG4n";
+const AIRTABLE_PROGRAMS_TABLE =
+  process.env.AIRTABLE_PROGRAMS_TABLE || "tblb080LKdZLFit2x";
 
 function esc(v: any): string {
   return String(v ?? "")
@@ -22,48 +15,47 @@ function esc(v: any): string {
     .replace(/>/g, "&gt;");
 }
 
-function raw(fields: any, name: string): any {
-  return fields?.[name];
+function getRecordId(req: any): string {
+  const q = req.query?.recordId;
+  if (typeof q === "string" && q.trim()) return decodeURIComponent(q.trim());
+  const match = (req.url || "").match(/[?&]recordId=([^&]+)/);
+  return match?.[1] ? decodeURIComponent(match[1].trim()) : "";
 }
 
-function displayValue(value: any, fallback = ""): string {
-  if (Array.isArray(value)) {
-    const mapped = value.map(v => {
-      if (typeof v === "string") return v.startsWith("rec") ? "" : v;
-      if (v?.name) return v.name;
-      if (v?.filename) return v.filename;
-      return "";
-    }).filter(Boolean);
-    return mapped.length ? mapped.join(", ") : fallback;
+function display(v: any, fallback = "—"): string {
+  if (Array.isArray(v)) return v.join(", ") || fallback;
+  if (v === undefined || v === null || v === "") return fallback;
+  return String(v);
+}
+
+function raw(fields: any, names: string | string[]) {
+  const arr = Array.isArray(names) ? names : [names];
+  for (const name of arr) {
+    const v = fields?.[name];
+    if (v !== undefined && v !== null && v !== "") return v;
   }
-
-  if (value === null || value === undefined || value === "") return fallback;
-  if (typeof value === "object") return value?.name || value?.id || fallback;
-  return String(value);
+  return null;
 }
 
-function field(fields: any, name: string, fallback = ""): string {
-  return displayValue(fields?.[name], fallback);
+function pick(fields: any, names: string | string[], fallback = "—") {
+  const v = raw(fields, names);
+  return display(v, fallback);
 }
 
-function num(value: any): number | null {
-  if (Array.isArray(value)) return value.length ? num(value[0]) : null;
-  if (value === null || value === undefined || value === "") return null;
-  const cleaned = String(value).replace("%", "").trim();
-  const n = Number(cleaned);
+function num(v: any): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(String(v).replace("%", "").trim());
   if (Number.isNaN(n)) return null;
-  if (n > 1 && n <= 100) return n / 100;
-  return n;
+  return n > 1 && n <= 100 ? n / 100 : n;
 }
 
-function pct(value: any): string {
-  const n = num(value);
-  if (n === null) return "—";
-  return `${Math.round(n * 100)}%`;
+function pct(v: any): string {
+  const n = num(v);
+  return n === null ? "—" : `${Math.round(n * 100)}%`;
 }
 
-function scoreColor(value: any): string {
-  const n = num(value);
+function color(v: any): string {
+  const n = num(v);
   if (n === null) return "#94a3b8";
   if (n >= 0.8) return "#07923b";
   if (n >= 0.6) return "#2563eb";
@@ -71,263 +63,317 @@ function scoreColor(value: any): string {
   return "#dc2626";
 }
 
-function statusLabel(value: any): string {
-  const n = num(value);
+function label(v: any): string {
+  const n = num(v);
   if (n === null) return "No data";
-  if (n >= 0.8) return "Stable";
-  if (n >= 0.6) return "Partial";
-  if (n >= 0.4) return "Fragile";
+  if (n >= 0.8) return "Strong";
+  if (n >= 0.6) return "Moderate";
+  if (n >= 0.4) return "Weak";
   return "Critical";
 }
 
 async function airtableFetch(url: string) {
+  if (!AIRTABLE_API_KEY) throw new Error("Missing AIRTABLE API key");
+
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-      "Content-Type": "application/json"
-    }
+      "Content-Type": "application/json",
+    },
   });
 
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(`Airtable fetch failed: ${response.status} ${text}`);
+    throw new Error(`Airtable ${response.status}: ${text}`);
   }
 
   return JSON.parse(text);
 }
 
-async function fetchProgramByRecordId(recordId: string) {
-  if (!AIRTABLE_API_KEY) throw new Error("Missing AIRTABLE_API_KEY.");
-  if (!AIRTABLE_BASE_ID) throw new Error("Missing AIRTABLE_BASE_ID.");
-
+async function fetchProgram(recordId: string) {
   const formula = `OR(RECORD_ID()="${recordId}",{Program ID}="${recordId}")`;
 
+  const params = new URLSearchParams({
+    filterByFormula: formula,
+    maxRecords: "1",
+    cellFormat: "string",
+    timeZone: "Europe/Paris",
+    userLocale: "en-us",
+  });
+
   const url =
-    `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_PROGRAMS_TABLE)}` +
-    `?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+    `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/` +
+    `${encodeURIComponent(AIRTABLE_PROGRAMS_TABLE)}?${params.toString()}`;
 
   const data = await airtableFetch(url);
 
-  if (!data.records || data.records.length === 0) {
-    throw new Error(`No Program found for: ${recordId}`);
+  if (!data.records?.length) {
+    throw new Error(`No Program found for ${recordId}`);
   }
 
-  return data.records[0];
+  return data.records[0].fields || {};
 }
 
-async function fetchActionById(actionRecordId: string) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
-    AIRTABLE_ACTIONS_TABLE
-  )}/${actionRecordId}`;
-
-  return await airtableFetch(url);
-}
-
-async function fetchLinkedActions(programRecord: any) {
-  const linked = programRecord.fields?.["Linked Actions"] || [];
-
-  if (!Array.isArray(linked) || linked.length === 0) return [];
-
-  const actions = [];
-
-  for (const actionId of linked) {
-    try {
-      const actionRecord = await fetchActionById(actionId);
-      actions.push(actionRecord);
-    } catch (e: any) {
-      console.log(`Failed to fetch linked action ${actionId}: ${e.message}`);
-    }
-  }
-
-  return actions;
-}
-
-function bar(label: string, value: any, sub = "") {
-  const n = Math.round((num(value) ?? 0) * 100);
+function bar(labelText: string, value: any, sub: string) {
+  const width = Math.round((num(value) ?? 0) * 100);
 
   return `
-  <div class="bar-row">
-    <div class="bar-label">
-      <b>${esc(label)}</b>
-      ${sub ? `<span>${esc(sub)}</span>` : ""}
-    </div>
-    <div class="bar-track">
-      <div class="bar-fill" style="width:${n}%;background:${scoreColor(value)}"></div>
-    </div>
-    <div class="bar-value">${n}%</div>
-  </div>`;
-}
-
-function statusPill(label: string, value: any) {
-  return `<span class="pill" style="background:${scoreColor(value)}22;color:${scoreColor(value)}">${esc(label)}</span>`;
-}
-
-function actionRows(actions: any[]) {
-  if (!actions.length) {
-    return `<tr><td colspan="6">No linked actions available.</td></tr>`;
-  }
-
-  return actions.map(action => {
-    const f = action.fields || {};
-    const id = field(f, "Action ID", action.id);
-    const name = field(f, "Action Name", "Untitled action");
-    const coherence = raw(f, "Overall Coherence");
-    const ociO = raw(f, "OCI-O");
-    const weakest = field(f, "Weakest Component", "Not assessed");
-    const workflow = field(f, "Workflow Step", "Not specified");
-
-    return `
-    <tr>
-      <td><b>${esc(id)}</b><br/><span>${esc(name)}</span></td>
-      <td><b style="color:${scoreColor(coherence)}">${pct(coherence)}</b></td>
-      <td><b style="color:${scoreColor(ociO)}">${pct(ociO)}</b></td>
-      <td>${esc(weakest)}</td>
-      <td>${esc(workflow)}</td>
-      <td>${statusPill(statusLabel(ociO), ociO)}</td>
-    </tr>`;
-  }).join("");
-}
-
-function bottleneckItems(data: any) {
-  const items = [
-    { title: "Institutional coordination", text: data.coordinationRisk || "Coordination structure requires reviewer confirmation.", level: data.coordinationScore },
-    { title: "Monitoring reliability", text: data.monitoringDiagnosis || "Monitoring reliability requires validation.", level: data.monitoringScore },
-    { title: "Escalation readiness", text: data.escalationDiagnosis || "Escalation pathway requires validation.", level: data.escalationScore },
-    { title: "Resource continuity", text: data.resourceDiagnosis || "Resource continuity requires validation.", level: data.resourceScore }
-  ];
-
-  return items.map(item => `
-    <div class="bottleneck-item">
-      <div class="bottleneck-top">
-        <b>${esc(item.title)}</b>
-        ${statusPill(statusLabel(item.level), item.level)}
+    <div class="bar-row">
+      <div>
+        <div class="bar-label">${esc(labelText)}</div>
+        <div class="bar-sub">${esc(sub)}</div>
       </div>
-      <div class="bottleneck-text">${esc(item.text)}</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${width}%;background:${color(value)}"></div>
+      </div>
+      <div class="bar-pct">${pct(value)}</div>
     </div>
-  `).join("");
+  `;
 }
 
-function triggerMonitor(data: any) {
+function kpi(title: string, value: any, sub: string) {
   return `
-  <div class="trigger-grid">
-    <div class="trigger-box"><div class="trigger-num">${esc(data.escalationExposure)}</div><div class="trigger-label">Escalation Exposure</div></div>
-    <div class="trigger-box"><div class="trigger-num">${esc(data.criticalActions)}</div><div class="trigger-label">Critical Actions</div></div>
-    <div class="trigger-box"><div class="trigger-num">${esc(data.validationStatus)}</div><div class="trigger-label">Validation Status</div></div>
-  </div>`;
+    <div class="card kpi">
+      <div class="kpi-title">${esc(title)}</div>
+      <div class="kpi-score" style="color:${color(value)}">${pct(value)}</div>
+      <div class="kpi-sub">${esc(sub)}</div>
+    </div>
+  `;
 }
 
-function buildDashboardData(program: any, actions: any[]) {
-  const f = program.fields || {};
-  const coordinationScore = raw(f, "Cross-Action Coherence") || raw(f, "Program Governance Score");
-  const resourceScore = raw(f, "C3 Score") || raw(f, "C3 Continuity Score");
-  const monitoringScore = raw(f, "C4 Score") || raw(f, "C4 Continuity Score");
-  const escalationScore = raw(f, "C5 Score") || raw(f, "C5 Continuity Score");
-  const auditScore = raw(f, "C6 Score") || raw(f, "C6 Continuity Score");
-  const continuityScore = raw(f, "Program Continuity Score") || raw(f, "Programme Stability Index");
+function build(fields: any) {
+  const finalCoherence = raw(fields, [
+    "Final Programme Coherence Score",
+    "Program Governance Score",
+    "Program Coherence Score",
+    "Overall Coherence Score",
+  ]);
+
+  const finalOciD = raw(fields, [
+    "Final Programme OCI-D Score",
+    "Programme Intrinsic OCI-D",
+    "OCI-D",
+  ]);
+
+  const finalOciO = raw(fields, [
+    "Final Programme OCI-O Score",
+    "Programme Intrinsic OCI-O",
+    "OCI-O",
+  ]);
+
+  const actionAggregation = raw(fields, [
+    "Action Aggregation Coherence Score",
+    "Overall Coherence Score",
+  ]);
 
   return {
-    programId: field(f, "Program ID", program.id),
-    programName: field(f, "Program Name", "Programme Execution Dashboard"),
-    leadAuthority: field(f, "Lead Authority", "Not specified"),
-    supportingAuthorities: field(f, "Supporting Authorities", "Not specified"),
-    coordinationOwner: field(f, "Coordination Owner", "Not specified"),
-    escalationAuthority: field(f, "Escalation Authority", "Not specified"),
-    validationAuthority: field(f, "Validation Authority", "Not specified"),
-    status: field(f, "Status", "Not specified"),
-    validationStatus: field(f, "Program Review Status", "Pending review"),
-    reviewPriority: field(f, "Reviewer Priority", "Medium"),
-    governanceScore: raw(f, "Program Governance Score") || raw(f, "Program Coherence Score"),
-    continuityScore,
-    coordinationScore,
-    resourceScore,
-    monitoringScore,
-    escalationScore,
-    auditScore,
-    escalationExposure: field(f, "Program Escalation Exposure") || field(f, "Escalation Exposure") || "0",
-    criticalActions: field(f, "Critical Actions Count", "0"),
-    weakestLayer: field(f, "Weakest Governance Layer", "Not assessed"),
-    weakestAction: field(f, "Weakest Action", "Not assessed"),
-    coordinationRisk: field(f, "Cross-Action Contradictions") || field(f, "Cross-Action Contradictions (AI)", ""),
-    policyDiagnosis: field(f, "Policy Diagnosis", "No policy diagnosis available."),
-    operationsDiagnosis: field(f, "Operations Diagnosis", "No operations diagnosis available."),
-    resourceDiagnosis: field(f, "Resources Diagnosis", "No resource diagnosis available."),
-    monitoringDiagnosis: field(f, "Monitoring Diagnosis", "No monitoring diagnosis available."),
-    escalationDiagnosis: field(f, "Escalation Diagnosis", "No escalation diagnosis available."),
-    auditDiagnosis: field(f, "Audit Trail Diagnosis", "No audit diagnosis available."),
-    synthesis: field(f, "Program Governance Summary (AI)") || field(f, "Program Governance Summary") || "No execution synthesis available yet.",
-    reviewerAction: field(f, "Reviewer Action Required") || field(f, "Recommended Reviewer Focus", "Review programme execution coherence."),
-    actions
+    name: pick(fields, "Program Name", "Programme Dashboard"),
+    id: pick(fields, "Program ID", "—"),
+    lead: pick(fields, "Lead Authority", "Not specified"),
+    support: pick(fields, "Supporting Authorities", "Not specified"),
+    coordination: pick(fields, "Coordination Owner", "Not specified"),
+    escalationAuthority: pick(fields, "Escalation Authority", "Not specified"),
+    validationAuthority: pick(fields, "Validation Authority", "Not specified"),
+    status: pick(fields, "Status", "—"),
+    reviewStatus: pick(fields, "Program Review Status", "Pending validation"),
+    reviewPriority: pick(fields, "Reviewer Priority", "Medium"),
+
+    finalCoherence,
+    finalOciD,
+    finalOciO,
+    actionAggregation,
+
+    claimSupportRate: raw(fields, "Claim Evidence Support Rate"),
+    programmeClaimCount: pick(fields, "Programme Claim Count", "0"),
+    evidenceLinkedClaimCount: pick(fields, "Evidence-Linked Claim Count", "0"),
+    weakClaimsCount: pick(fields, "Weak Claims Count", "—"),
+
+    c1: raw(fields, ["Programme C1 Claim-Evidence Score", "C1 Score"]),
+    c2: raw(fields, ["Programme C2 Claim-Evidence Score", "C2 Score"]),
+    c3: raw(fields, ["Programme C3 Claim-Evidence Score", "C3 Score"]),
+    c4: raw(fields, ["Programme C4 Claim-Evidence Score", "C4 Score"]),
+    c5: raw(fields, ["Programme C5 Claim-Evidence Score", "C5 Score"]),
+    c6: raw(fields, ["Programme C6 Claim-Evidence Score", "C6 Score"]),
+
+    weakestLayer: pick(fields, "Weakest Governance Layer", "Not assessed"),
+    weakestAction: pick(fields, "Weakest Action", "Not assessed"),
+    criticalActions: pick(fields, "Critical Actions Count", "0"),
+
+    narrative: pick(
+      fields,
+      [
+        "Program Governance Summary (AI)",
+        "Program Governance Summary",
+        "Programme OCI-D Rationale",
+      ],
+      "No programme governance narrative available."
+    ),
+
+    resourceDiagnosis: pick(
+      fields,
+      "Resource Diagnosis",
+      "Programme resource base requires review."
+    ),
+    monitoringDiagnosis: pick(
+      fields,
+      "Monitoring Diagnosis",
+      "Programme monitoring reliability requires review."
+    ),
+    escalationDiagnosis: pick(
+      fields,
+      "Escalation Diagnosis",
+      "Programme escalation pathways require review."
+    ),
+    auditDiagnosis: pick(
+      fields,
+      "Audit Trail Diagnosis",
+      "Programme documentation requires stronger evidence linkage."
+    ),
   };
 }
 
-function demoData(message = "Add a valid Program recordId to render the execution dashboard.") {
-  return {
-    programId: "Demo",
-    programName: "Programme Execution Dashboard",
-    leadAuthority: "Add ?recordId=recXXXXXXXX to the URL",
-    supportingAuthorities: "Demo",
-    coordinationOwner: "Demo",
-    escalationAuthority: "Demo",
-    validationAuthority: "Demo",
-    status: "Demo",
-    validationStatus: "Demo",
-    reviewPriority: "Demo",
-    governanceScore: null,
-    continuityScore: null,
-    coordinationScore: null,
-    resourceScore: null,
-    monitoringScore: null,
-    escalationScore: null,
-    auditScore: null,
-    escalationExposure: "0",
-    criticalActions: "0",
-    weakestLayer: "No data",
-    weakestAction: "No data",
-    coordinationRisk: "No data",
-    policyDiagnosis: "No data.",
-    operationsDiagnosis: "No data.",
-    resourceDiagnosis: "No data.",
-    monitoringDiagnosis: "No data.",
-    escalationDiagnosis: "No data.",
-    auditDiagnosis: "No data.",
-    synthesis: message,
-    reviewerAction: "No data.",
-    actions: []
-  };
+function html(d: any) {
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>${esc(d.name)}</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f3f6fb;color:#06164a;font-family:Arial,sans-serif;padding:18px}
+.page{max-width:1550px;margin:0 auto}
+.header,.card{background:#fff;border:1px solid #e8edf5;border-radius:18px;padding:18px;box-shadow:0 8px 24px rgba(15,23,42,.05)}
+.header{margin-bottom:14px}
+.kicker{font-size:12px;font-weight:900;text-transform:uppercase;color:#2563eb;margin-bottom:8px}
+.top{display:flex;justify-content:space-between;gap:18px;align-items:center}
+.title{font-size:30px;font-weight:900;line-height:1.15}
+.meta{display:flex;flex-wrap:wrap;gap:18px;margin-top:10px;font-size:13px}
+.badge{background:#eef4ff;color:#2563eb;border-radius:14px;padding:16px 20px;font-size:20px;font-weight:900}
+.grid6{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:14px}
+.grid3{display:grid;grid-template-columns:1fr 1.15fr 1fr;gap:14px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.kpi{text-align:center;min-height:130px}
+.kpi-title{font-size:15px;margin-bottom:10px}
+.kpi-score{font-size:33px;font-weight:900;line-height:1}
+.kpi-sub{font-size:12px;font-weight:800;color:#64748b;margin-top:10px}
+.section{font-size:19px;font-weight:900;margin-bottom:14px}
+.row{display:grid;grid-template-columns:170px 1fr;gap:12px;margin:12px 0;font-size:14px}
+.row b{font-weight:900}
+.bar-row{display:grid;grid-template-columns:220px 1fr 48px;gap:12px;align-items:center;margin:13px 0}
+.bar-label{font-size:15px;font-weight:900}
+.bar-sub{font-size:11px;color:#64748b;margin-top:2px}
+.bar-track{height:10px;background:#e5e7eb;border-radius:99px;overflow:hidden}
+.bar-fill{height:10px;border-radius:99px}
+.bar-pct{font-size:14px;font-weight:900;text-align:right}
+.warn{background:#fff7ed;border-color:#fed7aa}
+.ai{background:#f4f0ff;border-radius:14px;padding:14px;font-size:14px;line-height:1.6}
+.small{font-size:14px;line-height:1.6}
+.pill{display:inline-block;padding:6px 10px;border-radius:9px;font-size:12px;font-weight:900;background:#eef4ff;color:#2563eb}
+@media(max-width:1100px){
+  .grid6,.grid3,.grid2{grid-template-columns:1fr}
+  .top{display:block}
+  .badge{margin-top:12px}
+  .bar-row{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="header">
+  <div class="kicker">Programme Execution & Institutional Coordination Interface</div>
+  <div class="top">
+    <div>
+      <div class="title">${esc(d.name)}</div>
+      <div class="meta">
+        <div><b>Program ID:</b> ${esc(d.id)}</div>
+        <div><b>Lead Authority:</b> ${esc(d.lead)}</div>
+        <div><b>Status:</b> ${esc(d.status)}</div>
+        <div><b>Validation:</b> ${esc(d.reviewStatus)}</div>
+      </div>
+    </div>
+    <div class="badge">${esc(d.reviewPriority)} Review Priority</div>
+  </div>
+</div>
+
+<div class="grid6">
+  ${kpi("Final Coherence", d.finalCoherence, "Programme score")}
+  ${kpi("OCI-D", d.finalOciD, "Design Vertical Coherence")}
+  ${kpi("OCI-O", d.finalOciO, "Operational Coherence")}
+  ${kpi("Action Signal", d.actionAggregation, "Inherited action layer")}
+  ${kpi("Evidence Support", d.claimSupportRate, "Claim evidence coverage")}
+  ${kpi("Critical Actions", d.criticalActions, "Below threshold")}
+</div>
+
+<div class="grid3">
+  <div class="card">
+    <div class="section">Institutional Coordination Map</div>
+    <div class="row"><b>Lead Authority</b><div>${esc(d.lead)}</div></div>
+    <div class="row"><b>Supporting Authorities</b><div>${esc(d.support)}</div></div>
+    <div class="row"><b>Coordination Owner</b><div>${esc(d.coordination)}</div></div>
+    <div class="row"><b>Escalation Authority</b><div>${esc(d.escalationAuthority)}</div></div>
+    <div class="row"><b>Validation Authority</b><div>${esc(d.validationAuthority)}</div></div>
+  </div>
+
+  <div class="card">
+    <div class="section">Programme C1–C6 Claim-Evidence Matrix</div>
+    ${bar("C1 Policy / Document", d.c1, "Vertical + horizontal coherence")}
+    ${bar("C2 Operational", d.c2, "Institutional embedding")}
+    ${bar("C3 Resources", d.c3, "Budget and capacity")}
+    ${bar("C4 Monitoring", d.c4, "Visibility and reporting")}
+    ${bar("C5 Escalation", d.c5, "Triggers and response")}
+    ${bar("C6 Traceability", d.c6, "Auditability and evidence continuity")}
+  </div>
+
+  <div class="card warn">
+    <div class="section">Programme Trigger Monitor</div>
+    <div class="small"><b>Weakest Layer:</b> ${esc(d.weakestLayer)}</div>
+    <br/>
+    <div class="small"><b>Weakest Action:</b> ${esc(d.weakestAction)}</div>
+    <br/>
+    <span class="pill">Renderer active</span>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <div class="section">Claim & Evidence Control</div>
+    <div class="row"><b>Programme Claims</b><div>${esc(d.programmeClaimCount)}</div></div>
+    <div class="row"><b>Evidence-Linked Claims</b><div>${esc(d.evidenceLinkedClaimCount)}</div></div>
+    <div class="row"><b>Weak Claims</b><div>${esc(d.weakClaimsCount)}</div></div>
+    <div class="row"><b>Evidence Support Rate</b><div>${pct(d.claimSupportRate)}</div></div>
+  </div>
+
+  <div class="card">
+    <div class="section">Programme Operational Narrative</div>
+    <div class="ai">${esc(d.narrative)}</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <div class="section">Execution Diagnostics</div>
+  <div class="small"><b>Resource:</b> ${esc(d.resourceDiagnosis)}</div><br/>
+  <div class="small"><b>Monitoring:</b> ${esc(d.monitoringDiagnosis)}</div><br/>
+  <div class="small"><b>Escalation:</b> ${esc(d.escalationDiagnosis)}</div><br/>
+  <div class="small"><b>Audit:</b> ${esc(d.auditDiagnosis)}</div>
+</div>
+
+</div>
+</body>
+</html>`;
 }
 
-function renderDashboard(data: any): string {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>${esc(data.programId)} Execution Dashboard</title><style>
-*{box-sizing:border-box}body{margin:0;background:#f6f8fc;color:#07164a;font-family:Arial,sans-serif;padding:18px}.page{max-width:1680px;margin:0 auto}.header{background:#fff;border:1px solid #e8edf5;border-radius:18px;padding:18px 22px;box-shadow:0 8px 24px rgba(15,23,42,.06);margin-bottom:14px}.interface{font-size:12px;font-weight:900;color:#2563eb;text-transform:uppercase;margin-bottom:10px}.topline{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}.title{font-size:28px;font-weight:900;line-height:1.15}.meta{display:flex;flex-wrap:wrap;gap:22px;margin-top:12px;font-size:13px}.badge{background:#eef4ff;color:#2563eb;padding:8px 12px;border-radius:10px;font-weight:900}.grid-kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:14px}.card{background:#fff;border:1px solid #e8edf5;border-radius:14px;padding:18px;box-shadow:0 8px 24px rgba(15,23,42,.05)}.kpi-title{font-weight:900;font-size:13px;text-align:center;margin-bottom:10px}.kpi-score{font-size:31px;font-weight:900;text-align:center;line-height:1}.kpi-sub{text-align:center;margin-top:8px;font-size:12px;font-weight:800;color:#64748b}.grid-main{display:grid;grid-template-columns:1fr 1.1fr 1fr;gap:14px;margin-bottom:14px}.grid-lower{display:grid;grid-template-columns:1.1fr 1fr;gap:14px;margin-bottom:14px}.section-title{font-size:18px;font-weight:900;margin-bottom:12px}.bar-row{display:grid;grid-template-columns:190px 1fr 44px;gap:12px;align-items:center;margin:13px 0}.bar-label{font-size:13px}.bar-label span{display:block;color:#64748b;font-size:11px;margin-top:2px}.bar-track{height:9px;background:#e5e7eb;border-radius:99px;overflow:hidden}.bar-fill{height:9px;border-radius:99px}.bar-value{text-align:right;font-size:13px;font-weight:900}.pill{display:inline-block;padding:5px 9px;border-radius:8px;font-size:11px;font-weight:900}.institution-row{display:grid;grid-template-columns:150px 1fr;gap:10px;margin:10px 0;font-size:13px}.trigger-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.trigger-box{background:#f8fafc;border:1px solid #e8edf5;border-radius:12px;padding:14px;text-align:center}.trigger-num{font-size:25px;font-weight:900;color:#f97316}.trigger-label{font-size:12px;font-weight:800;color:#64748b}.bottleneck-item{border-bottom:1px solid #e5e7eb;padding:11px 0}.bottleneck-item:last-child{border-bottom:none}.bottleneck-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.bottleneck-text{font-size:13px;line-height:1.45;color:#334155;margin-top:7px}.table{width:100%;border-collapse:collapse;font-size:12px}.table th{background:#f8fafc;text-align:left;padding:8px;border-bottom:1px solid #e5e7eb}.table td{padding:8px;border-bottom:1px solid #e5e7eb;vertical-align:top}.table span{font-size:11px;color:#64748b}.ai-box{background:#f4f0ff;border-radius:14px;padding:14px;font-size:13px;line-height:1.55}.priority{background:#eef4ff}.warn{background:#fff7ed;border:1px solid #fed7aa}.small{font-size:13px;line-height:1.55}@media(max-width:1200px){.grid-kpi,.grid-main,.grid-lower{grid-template-columns:1fr}.bar-row{grid-template-columns:1fr}.bar-value{text-align:left}}
-</style></head><body><div class="page"><div class="header"><div class="interface">Programme Execution & Institutional Coordination Interface</div><div class="topline"><div><div class="title">${esc(data.programName)}</div><div class="meta"><div><b>Program ID:</b> ${esc(data.programId)}</div><div><b>Lead Authority:</b> ${esc(data.leadAuthority)}</div><div><b>Status:</b> ${esc(data.status)}</div><div><b>Validation:</b> ${esc(data.validationStatus)}</div></div></div><div class="badge">${esc(data.reviewPriority)} Review Priority</div></div></div>
-<div class="grid-kpi"><div class="card"><div class="kpi-title">Execution Condition</div><div class="kpi-score" style="color:${scoreColor(data.governanceScore)}">${pct(data.governanceScore)}</div><div class="kpi-sub">${statusLabel(data.governanceScore)}</div></div><div class="card"><div class="kpi-title">Continuity Posture</div><div class="kpi-score" style="color:${scoreColor(data.continuityScore)}">${pct(data.continuityScore)}</div><div class="kpi-sub">Programme continuity</div></div><div class="card"><div class="kpi-title">Coordination Health</div><div class="kpi-score" style="color:${scoreColor(data.coordinationScore)}">${pct(data.coordinationScore)}</div><div class="kpi-sub">Cross-action coherence</div></div><div class="card"><div class="kpi-title">Monitoring Reliability</div><div class="kpi-score" style="color:${scoreColor(data.monitoringScore)}">${pct(data.monitoringScore)}</div><div class="kpi-sub">C4 execution visibility</div></div><div class="card"><div class="kpi-title">Escalation Readiness</div><div class="kpi-score" style="color:${scoreColor(data.escalationScore)}">${pct(data.escalationScore)}</div><div class="kpi-sub">C5 response chain</div></div><div class="card"><div class="kpi-title">Critical Actions</div><div class="kpi-score" style="color:#f97316">${esc(data.criticalActions)}</div><div class="kpi-sub">Below threshold</div></div></div>
-<div class="grid-main"><div class="card"><div class="section-title">Institutional Coordination Map</div><div class="institution-row"><b>Lead Authority</b><div>${esc(data.leadAuthority)}</div></div><div class="institution-row"><b>Supporting Authorities</b><div>${esc(data.supportingAuthorities)}</div></div><div class="institution-row"><b>Coordination Owner</b><div>${esc(data.coordinationOwner)}</div></div><div class="institution-row"><b>Escalation Authority</b><div>${esc(data.escalationAuthority)}</div></div><div class="institution-row"><b>Validation Authority</b><div>${esc(data.validationAuthority)}</div></div></div><div class="card"><div class="section-title">Operational Dependency Matrix</div>${bar("Resource continuity", data.resourceScore, "C3 funding and resource feasibility")}${bar("Monitoring reliability", data.monitoringScore, "C4 data and reporting continuity")}${bar("Escalation readiness", data.escalationScore, "C5 trigger and response integrity")}${bar("Auditability integrity", data.auditScore, "C6 traceability and evidence chain")}${bar("Coordination health", data.coordinationScore, "Cross-action institutional coherence")}</div><div class="card warn"><div class="section-title">Programme Trigger Monitor</div>${triggerMonitor(data)}<br/><div class="small"><b>Weakest Layer:</b> ${esc(data.weakestLayer)}</div><div class="small"><b>Weakest Action:</b> ${esc(data.weakestAction)}</div></div></div>
-<div class="grid-main"><div class="card"><div class="section-title">Institutional Bottlenecks</div>${bottleneckItems(data)}</div><div class="card"><div class="section-title">Resource & Funding Integrity</div><div class="small"><b>Resource diagnosis:</b> ${esc(data.resourceDiagnosis)}</div><br/><div class="small"><b>Operations diagnosis:</b> ${esc(data.operationsDiagnosis)}</div><br/><div class="small"><b>Policy dependency:</b> ${esc(data.policyDiagnosis)}</div></div><div class="card"><div class="section-title">Escalation Flow Integrity</div><div class="small"><b>Escalation diagnosis:</b> ${esc(data.escalationDiagnosis)}</div><br/><div class="small"><b>Audit trail:</b> ${esc(data.auditDiagnosis)}</div><br/><div class="small"><b>Reviewer action:</b> ${esc(data.reviewerAction)}</div></div></div>
-<div class="grid-lower"><div class="card"><div class="section-title">Action Continuity Heatmap</div><table class="table"><thead><tr><th>Action</th><th>Coherence</th><th>OCI-O</th><th>Weakest Layer</th><th>Workflow</th><th>Status</th></tr></thead><tbody>${actionRows(data.actions)}</tbody></table></div><div class="card priority"><div class="section-title">Programme Operational Narrative</div><div class="ai-box">${esc(data.synthesis)}</div></div></div></div></body></html>`;
-}
+app.get("/", (_req, res) => res.redirect("/api"));
 
-async function handleDashboard(req: any, res: any) {
+app.get("/api", async (req, res) => {
   try {
-    const recordId = getRecordId(req);
-
-    if (!recordId) {
-      return res.type("html").send(renderDashboard(demoData()));
-    }
-
-    const program = await fetchProgramByRecordId(recordId);
-    const actions = await fetchLinkedActions(program);
-    const data = buildDashboardData(program, actions);
-
-    return res.type("html").send(renderDashboard(data));
-  } catch (error: any) {
-    return res.status(500).type("html").send(renderDashboard(demoData(error.message || String(error))));
+    const id = getRecordId(req);
+    const fields = id ? await fetchProgram(id) : {};
+    res.type("html").send(html(build(fields)));
+  } catch (e: any) {
+    res.status(500).type("html").send(`<pre>${esc(e.message || String(e))}</pre>`);
   }
-}
-
-app.get("/", handleDashboard);
-app.get("/api", handleDashboard);
-app.post("/", (req, res) => res.type("html").send(renderDashboard(req.body || demoData())));
-app.post("/api", (req, res) => res.type("html").send(renderDashboard(req.body || demoData())));
+});
 
 export default app;
