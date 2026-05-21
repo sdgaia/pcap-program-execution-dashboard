@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "src/index.ts": {
+      "runtime": "vercel-node@3.2.15"
+    }
+  },
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/index.ts"
+    }
+  ]
+}
