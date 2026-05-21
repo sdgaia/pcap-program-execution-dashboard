@@ -4,7 +4,7 @@ import express from "express";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || "";
+const AIRTABLE_API_KEY = process.env.AIRTABLE || "";
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || "";
 const AIRTABLE_PROGRAMS_TABLE = process.env.AIRTABLE_PROGRAMS_TABLE || "tblb080LKdZLFit2x";
 const AIRTABLE_ACTIONS_TABLE = process.env.AIRTABLE_ACTIONS_TABLE || "tblaMHswXQx4r9ba1";
