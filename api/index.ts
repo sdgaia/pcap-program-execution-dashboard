@@ -12,14 +12,34 @@ function getRecordId(req: any): string {
   return match?.[1] ? decodeURIComponent(match[1]).trim() : "";
 }
 
+function isRecId(value: any): boolean {
+  return typeof value === "string" && /^rec[a-zA-Z0-9]{10,}$/.test(value.trim());
+}
+
+function displayValue(value: any, fallback = ""): string {
+  if (Array.isArray(value)) {
+    const mapped = value
+      .map((v) => {
+        if (typeof v === "string") return isRecId(v) ? "" : v;
+        if (v?.name) return v.name;
+        if (v?.filename) return v.filename;
+        if (v?.id && !isRecId(v.id)) return v.id;
+        return "";
+      })
+      .filter(Boolean);
+    return mapped.length ? mapped.join(", ") : fallback;
+  }
+
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "string") return isRecId(value) ? fallback : value;
+  if (typeof value === "object") return value.name || value.filename || fallback;
+  return String(value);
+}
+
 function pick(fields: any, names: string[], fallback = "—") {
   for (const name of names) {
-    const value = fields?.[name];
-    if (value !== undefined && value !== null && value !== "") {
-      if (Array.isArray(value)) return value.map(v => v?.name || v).join(", ") || fallback;
-      if (typeof value === "object") return value.name || value.id || fallback;
-      return String(value);
-    }
+    const rendered = displayValue(fields?.[name], "");
+    if (rendered) return rendered;
   }
   return fallback;
 }
@@ -84,11 +104,11 @@ function buildData(program: any, runtimeMessage = "") {
   return {
     programId: pick(f, ["Program ID"], program?.id || "PLACEHOLDER"),
     programName: pick(f, ["Program Name"], "Programme Execution Dashboard"),
-    leadAuthority: pick(f, ["Lead Authority"], "Lead authority placeholder"),
-    supportingAuthorities: pick(f, ["Supporting Authorities"], "Supporting authorities placeholder"),
-    coordinationOwner: pick(f, ["Coordination Owner"], "Coordination owner placeholder"),
-    escalationAuthority: pick(f, ["Escalation Authority"], "Escalation authority placeholder"),
-    validationAuthority: pick(f, ["Validation Authority"], "Validation authority placeholder"),
+    leadAuthority: pick(f, ["Lead Authority Name", "Lead Authority Names", "Lead Authority Display", "Lead Authority Lookup", "Lead Authority (Name)", "Lead Authority"], "Not specified"),
+    supportingAuthorities: pick(f, ["Supporting Authorities Names", "Supporting Authority Names", "Supporting Authorities Display", "Supporting Authorities Lookup", "Supporting Authorities (Name)", "Supporting Authorities"], "Not specified"),
+    coordinationOwner: pick(f, ["Coordination Owner Name", "Coordination Owner Display", "Coordination Owner Lookup", "Coordination Owner (Name)", "Coordination Owner"], "Not specified"),
+    escalationAuthority: pick(f, ["Escalation Authority Name", "Escalation Authority Names", "Escalation Authority Display", "Escalation Authority Lookup", "Escalation Authority (Name)", "Escalation Authority"], "Not specified"),
+    validationAuthority: pick(f, ["Validation Authority Name", "Validation Authority Names", "Validation Authority Display", "Validation Authority Lookup", "Validation Authority (Name)", "Validation Authority"], "Not specified"),
     statusText: pick(f, ["Status"], "Draft / Placeholder"),
     reviewStatus: pick(f, ["Program Review Status"], "Pending review"),
     reviewPriority: pick(f, ["Reviewer Priority"], "Medium"),
